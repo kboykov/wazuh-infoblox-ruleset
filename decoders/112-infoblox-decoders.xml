@@ -1,0 +1,142 @@
+<!--
+  Infoblox Data Connector (BloxOne) — CEF Decoders
+  Source format: RFC5424 syslog, app-name "dataconnector", payload in CEF.
+    <134>1 2026-06-08T14:31:00Z eFellows3DC dataconnector - DNS-RESPONSE - CEF:0|Infoblox|Data Connector|...|key=value ...
+
+  Event families seen in the wild:
+    1. DNS Response (CEF name "DNS Response")        — A/AAAA/HTTPS/TXT/SRV/... + NOERROR|NXDOMAIN
+    2. RPZ threat events (CEF name "RPZ-QNAME-*")     — DNS Firewall block/redirect
+    3. DHCP lease events (CEF name "DHCP-LEASE-*")    — lease update/delete (IP-to-MAC)
+    4. Service / agent logs (CEF "BloxOne-Service-Log")
+
+  Note: fields are CEF key=value extensions. We anchor on specific keys and use
+  non-greedy gaps (.*?) so we tolerate variable field ordering / empty optionals.
+  Verified against sample capture: 08 June 2026
+-->
+
+<!-- ==================================================================
+     PARENT — any Infoblox Data Connector CEF record
+     Anchored on the CEF header rather than program_name, because RFC5424
+     app-name extraction is not guaranteed across syslog collectors.
+     ================================================================== -->
+<decoder name="infoblox-cef">
+  <prematch type="pcre2">CEF:0\|Infoblox\|Data Connector</prematch>
+</decoder>
+
+<!-- ==================================================================
+     SECTION 1: DNS Response
+     IMPORTANT: two pipelines emit different CEF field orders, so we need a
+     decoder for each. Wazuh tries them in order and falls through on regex miss.
+       Cloud (InfobloxB1Region=eu-central-1):
+         ...src=10.11.110.130 destinationDnsDomain=example.com. spt=12057 InfobloxDNSQType=A InfobloxDNSRCode=NOERROR...
+       On-prem NIOS-X (InfobloxB1Region=nios-x):
+         ...InfobloxDNSRCode=NXDOMAIN ... InfobloxDNSQType=A ... src=172.16.8.1 destinationDnsDomain=example.com. ...
+     ================================================================== -->
+
+<!-- Cloud pipeline order: src/domain first, QType/RCODE last -->
+<decoder name="infoblox-cef-dns">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">\|DNS Response\|</prematch>
+  <regex type="pcre2">\bsrc=(\S+)\s+destinationDnsDomain=(\S+).*?InfobloxDNSQType=(\S+)\s+InfobloxDNSRCode=(\S+)</regex>
+  <order>srcip, dns_domain, dns_type, dns_response</order>
+</decoder>
+
+<!-- NIOS-X pipeline order: RCODE/QType first, src/domain last -->
+<decoder name="infoblox-cef-dns-niosx">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">\|DNS Response\|</prematch>
+  <regex type="pcre2">InfobloxDNSRCode=(\S+).*?InfobloxDNSQType=(\S+).*?\bsrc=(\S+)\s+destinationDnsDomain=(\S+)</regex>
+  <order>dns_response, dns_type, srcip, dns_domain</order>
+</decoder>
+
+<!-- ==================================================================
+     SECTION 2: RPZ / DNS Firewall Threat events
+     Prematch broadened to \|RPZ- so ALL trigger types decode, not just
+     QNAME: RPZ-IP-*, RPZ-CLIENT-IP-*, RPZ-NSDNAME-*, RPZ-NSIP-* (the rule
+     type + action are encoded in the CEF NAME header). Field order verified
+     against 2.1.3 emitter (08 June 2026):
+       ...InfobloxB1FeedName=Infoblox_High_Risk ... InfobloxB1PolicyAction=Redirect
+       ... src=172.16.35.1 destinationDnsDomain=magistralki.com. ... InfobloxDNSQType=A
+       ... InfobloxThreatConfidence=100 InfobloxThreatLevel=80 InfobloxThreatProperty=Suspicious_Nameserver
+     NOTE: suser= is empty in this deployment (user identity not forwarded),
+     so it is intentionally not captured. Tags are quoted/space-bearing and
+     are left to the feed name (InfobloxB1FeedName) for context.
+     Decoders are ordered rich -> full -> min; Wazuh applies the first whose
+     regex matches, so feed/confidence enrichment degrades gracefully.
+     ================================================================== -->
+
+<!-- Rich: feed-based threat hit with confidence + threat level + property -->
+<decoder name="infoblox-cef-rpz-rich">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">\|RPZ-</prematch>
+  <regex type="pcre2">InfobloxB1FeedName=(\S+).*?InfobloxB1PolicyAction=(\S+).*?\bsrc=(\S+)\s+destinationDnsDomain=(\S+).*?InfobloxThreatConfidence=(\d+)\s+InfobloxThreatLevel=(\d+)\s+InfobloxThreatProperty=(\S+)</regex>
+  <order>rpz_feed, rpz_action, srcip, dns_domain, threat_confidence, threat_level, threat_property</order>
+</decoder>
+
+<!-- Full: threat metadata present but no feed/confidence (or empty property) -->
+<decoder name="infoblox-cef-rpz">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">\|RPZ-</prematch>
+  <regex type="pcre2">InfobloxB1PolicyAction=(\S+).*?\bsrc=(\S+)\s+destinationDnsDomain=(\S+).*?InfobloxThreatLevel=(\d+)\s+InfobloxThreatProperty=(\S+)</regex>
+  <order>rpz_action, srcip, dns_domain, threat_level, threat_property</order>
+</decoder>
+
+<!-- Fallback for RPZ events that lack the threat metadata block
+     (e.g. pure policy actions with empty InfobloxThreatProperty). -->
+<decoder name="infoblox-cef-rpz-min">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">\|RPZ-</prematch>
+  <regex type="pcre2">InfobloxB1PolicyAction=(\S+).*?\bsrc=(\S+)\s+destinationDnsDomain=(\S+)</regex>
+  <order>rpz_action, srcip, dns_domain</order>
+</decoder>
+
+<!-- ==================================================================
+     SECTION 3: DHCP Lease events (CEF name DHCP-LEASE-UPDATE / DHCP-LEASE-DELETE)
+     src=10.11.110.130 InfobloxClientID=... smac=b8:1e:a4:48:b3:0f ... InfobloxSubnet=10.11.110.0/24 ... InfobloxLeaseOp=Update
+     ================================================================== -->
+<decoder name="infoblox-cef-dhcp">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">\|DHCP-LEASE-</prematch>
+  <regex type="pcre2">\bsrc=(\S+)\s+InfobloxClientID=\S*.*?\bsmac=([a-fA-F0-9:]+).*?InfobloxSubnet=(\S+).*?InfobloxLeaseOp=(\S+)</regex>
+  <order>dhcp_ip, dhcp_mac, dhcp_subnet, dhcp_leaseop</order>
+</decoder>
+
+<!-- ==================================================================
+     SECTION 4: Service / Agent logs (kea-dhcp, cdc_agent, discovery, ...)
+     CEF name BloxOne-Service-Log; InfobloxLogName=<pool-hash>/<service>
+     ================================================================== -->
+<decoder name="infoblox-cef-service">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">\|BloxOne-Service-Log\|</prematch>
+  <regex type="pcre2">InfobloxLogName=(\S+)</regex>
+  <order>service_name</order>
+</decoder>
+
+<!-- ==================================================================
+     SECTION 5 (PRE-STAGED): Audit Logs & SOC Insights
+     These event types are NOT currently forwarded by this Data Connector
+     (verified absent in the stream 08 June 2026). Enable them in the Data
+     Connector traffic-flow config, capture a sample, then UNCOMMENT and
+     verify field order before relying on them. CEF keys below are from the
+     official "Event Field Logs" doc; the in-payload ORDER is unverified.
+     ================================================================== -->
+
+<!-- SOC Insights (server-side Threat Insight: DGA / tunneling / lookalike).
+     Anchored on InfobloxInsightId (unique, collision-safe key).
+<decoder name="infoblox-cef-insight">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">InfobloxInsightId=</prematch>
+  <regex type="pcre2">InfobloxThreatClass=(\S+).*?InfobloxThreatFamily=(\S+).*?InfobloxThreatLevel=(\d+)</regex>
+  <order>insight_threat_class, insight_threat_family, threat_level</order>
+</decoder>
+-->
+
+<!-- Audit Logs (admin login, config create/modify/delete). CEF action/user/
+     result keys are deployment-dependent; confirm against a sample first.
+<decoder name="infoblox-cef-audit">
+  <parent>infoblox-cef</parent>
+  <prematch type="pcre2">\|(Audit|AUDIT-LOG)\|</prematch>
+  <regex type="pcre2">act=(\S+).*?suser=(\S+).*?\bclient_ip=(\S+).*?\bresult=(\S+)</regex>
+  <order>audit_action, audit_user, audit_client_ip, audit_result</order>
+</decoder>
+-->

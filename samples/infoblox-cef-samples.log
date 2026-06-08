@@ -1,0 +1,34 @@
+# Infoblox Data Connector (BloxOne / Universal DDI) CEF syslog samples
+# RFC5424 syslog, app-name "dataconnector", CEF payload. Sanitized for distribution.
+# Feed these line-by-line to `wazuh-logtest` to validate decoding + rules.
+# (The leading <PRI>1 syslog header is optional; decoders anchor on the CEF header.)
+
+# --- DNS Response: NXDOMAIN (rule 118002) ---
+<134>1 2026-06-08T18:47:45Z host dataconnector - DNS-RESPONSE - CEF:0|Infoblox|Data Connector|2.1.3|DNS Response|DNS Response IN A NXDOMAIN|1|app=DNS InfobloxB1DNSTags=APP_Uncategorized,CAT_Uncategorized src=10.0.0.10 destinationDnsDomain=nonexistent.example. spt=38174 InfobloxDNSQType=A InfobloxDNSRCode=NXDOMAIN InfobloxB1Region=eu-central-1 proto=UDP InfobloxDNSView=default
+
+# --- DNS Response: NOERROR (rule 118001, level 0 telemetry) ---
+<134>1 2026-06-08T18:47:45Z host dataconnector - DNS-RESPONSE - CEF:0|Infoblox|Data Connector|2.1.3|DNS Response|DNS Response IN A NOERROR|1|app=DNS src=10.0.0.10 destinationDnsDomain=www.example.com. spt=1234 InfobloxDNSQType=A InfobloxDNSRCode=NOERROR proto=UDP
+
+# --- DNS Response: TXT lookup (rule 118006, level 0; feeds tunneling correlation 118007) ---
+<134>1 2026-06-08T18:47:45Z host dataconnector - DNS-RESPONSE - CEF:0|Infoblox|Data Connector|2.1.3|DNS Response|DNS Response IN TXT NOERROR|1|app=DNS src=10.0.0.99 destinationDnsDomain=chunk01.tunnel.example. spt=5 InfobloxDNSQType=TXT InfobloxDNSRCode=NOERROR proto=UDP
+
+# --- DNS Response: SERVFAIL (rule 118004; floods -> 118005) ---
+<134>1 2026-06-08T18:47:45Z host dataconnector - DNS-RESPONSE - CEF:0|Infoblox|Data Connector|2.1.3|DNS Response|DNS Response IN A SERVFAIL|1|app=DNS src=10.0.0.10 destinationDnsDomain=broken.example. spt=4321 InfobloxDNSQType=A InfobloxDNSRCode=SERVFAIL proto=UDP
+
+# --- RPZ: DoH redirect, threat_level 0 (rule 118010 only, no escalation) ---
+<134>1 2026-06-08T18:45:50Z host dataconnector - RPZ-QNAME-REDIRECT - CEF:0|Infoblox|Data Connector|2.1.3|RPZ-QNAME-REDIRECT|RPZ EVENT QNAME REDIRECT|1|app=DNS InfobloxB1DNSTags="APP_iCloud,CAT_Personal Storage,public-doh" InfobloxB1FeedName=Public_DOH InfobloxB1FeedType=FQDN InfobloxB1PolicyAction=Redirect InfobloxB1PolicyName="default policy" InfobloxB1ThreatIndicator=mask.icloud.com src=10.0.0.20 destinationDnsDomain=mask.icloud.com. spt=11636 InfobloxDNSQType=HTTPS act=REDIRECT InfobloxThreatConfidence=100 InfobloxThreatLevel=0 InfobloxThreatProperty=InternetInfrastructure_DoHService suser= InfobloxDNSView=default
+
+# --- RPZ: high-risk redirect, threat_level 80 (rule 118011 HIGH, level 12) ---
+<134>1 2026-06-08T18:20:08Z host dataconnector - RPZ-QNAME-REDIRECT - CEF:0|Infoblox|Data Connector|2.1.3|RPZ-QNAME-REDIRECT|RPZ EVENT QNAME REDIRECT|8|app=DNS InfobloxB1DNSTags="APP_Uncategorized,CAT_Reference,infoblox-high-risk" InfobloxB1FeedName=Infoblox_High_Risk InfobloxB1FeedType=FQDN InfobloxB1PolicyAction=Redirect InfobloxB1PolicyName="default policy" InfobloxB1ThreatIndicator=bad.example src=10.0.0.30 destinationDnsDomain=bad.example. spt=7081 InfobloxDNSQType=A act=REDIRECT InfobloxThreatConfidence=100 InfobloxThreatLevel=80 InfobloxThreatProperty=Suspicious_Nameserver suser= InfobloxDNSView=default
+
+# --- RPZ: hard block / NXDOMAIN action with malware property (rule 118016 + 118011/118012) ---
+<134>1 2026-06-08T18:30:00Z host dataconnector - RPZ-QNAME-NXDOMAIN - CEF:0|Infoblox|Data Connector|2.1.3|RPZ-QNAME-NXDOMAIN|RPZ EVENT QNAME NXDOMAIN|8|app=DNS InfobloxB1FeedName=AntiMalware InfobloxB1PolicyAction=Block src=10.0.0.40 destinationDnsDomain=malware-c2.example. spt=2048 InfobloxDNSQType=A act=NXDOMAIN InfobloxThreatConfidence=100 InfobloxThreatLevel=90 InfobloxThreatProperty=MalwareC2 suser=
+
+# --- DHCP: lease delete (rule 118020) ---
+<134>1 2026-06-08T10:14:24Z host dataconnector - DHCP-LEASE-DELETE - CEF:0|Infoblox|Data Connector|2.1.3|DHCP-LEASE-DELETE|DHCP Lease Delete|1|src=10.0.0.158 InfobloxClientID=01:80:6d:97:8a:91 InfobloxRangeEnd=10.0.0.250 InfobloxRangeStart=10.0.0.100 smac=80:6d:97:8a:91:9a InfobloxSubnet=10.0.0.0/24 InfobloxLeaseOp=Delete app=DHCP cat="DHCP Lease Delete"
+
+# --- DHCP: lease abandon (rule 118021; floods -> 118022 starvation) ---
+<134>1 2026-06-08T10:15:00Z host dataconnector - DHCP-LEASE-ABANDON - CEF:0|Infoblox|Data Connector|2.1.3|DHCP-LEASE-ABANDON|DHCP Lease Abandon|1|src=10.0.0.159 InfobloxClientID=01:80:6d:97:8a:92 smac=80:6d:97:8a:91:9b InfobloxSubnet=10.0.0.0/24 InfobloxLeaseOp=Abandon app=DHCP
+
+# --- BloxOne Service Log: kea-dhcp WARN (rule 118031) ---
+<134>1 2026-06-08T15:26:52Z host dataconnector - SERVICE-LOG - CEF:0|Infoblox|Data Connector|Service Log|BloxOne-Service-Log|poolhash/ns-dhcp:dhcp|1|InfobloxLogName=poolhash/ns-dhcp:dhcp msg=" WARN  [kea-dhcp4.dhcp4] DHCP4_MULTI_THREADING_INFO enabled" InfobloxPoolId=infra/pool/abc InfobloxServiceId=infra/service/xyz

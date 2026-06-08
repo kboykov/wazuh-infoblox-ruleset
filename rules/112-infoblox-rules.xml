@@ -1,0 +1,259 @@
+<group name="infoblox,">
+
+  <!-- ============================================================== -->
+  <!-- BASE — every Infoblox Data Connector CEF event                -->
+  <!-- (children chain off the parent decoder name via decoded_as)   -->
+  <!-- ============================================================== -->
+  <rule id="118000" level="0">
+    <decoded_as>infoblox-cef</decoded_as>
+    <description>Infoblox Data Connector: CEF event</description>
+    <group>infoblox_dataconnector,</group>
+  </rule>
+
+  <!-- ============================================================== -->
+  <!-- SECTION 1: DNS RESPONSE                                        -->
+  <!-- ============================================================== -->
+
+  <!-- Normal resolution (NOERROR) — extremely high volume, telemetry only -->
+  <rule id="118001" level="0">
+    <if_sid>118000</if_sid>
+    <field name="dns_response" type="pcre2">^NOERROR$</field>
+    <description>Infoblox DNS: $(dns_type) response for $(dns_domain) from $(srcip) — NOERROR</description>
+    <options>no_full_log</options>
+    <group>infoblox_dns,dns_response,</group>
+  </rule>
+
+  <!-- NXDOMAIN — domain does not exist (DGA / typo / stale config) -->
+  <rule id="118002" level="3">
+    <if_sid>118000</if_sid>
+    <field name="dns_response" type="pcre2">^NXDOMAIN$</field>
+    <description>Infoblox DNS: NXDOMAIN for $(dns_domain) ($(dns_type)) from $(srcip)</description>
+    <group>infoblox_dns,dns_nxdomain,</group>
+  </rule>
+
+  <!-- NXDOMAIN flood from one client — DGA malware beaconing -->
+  <rule id="118003" level="10" frequency="20" timeframe="60">
+    <if_matched_sid>118002</if_matched_sid>
+    <same_field>srcip</same_field>
+    <description>Infoblox DNS: Client $(srcip) got 20+ NXDOMAIN in 60s — Possible DGA Malware</description>
+    <mitre>
+      <id>T1568.002</id>
+    </mitre>
+    <group>infoblox_dns,dns_nxdomain,dga_malware,infected_host,</group>
+  </rule>
+
+  <!-- Server-side resolution failure (SERVFAIL / REFUSED) -->
+  <rule id="118004" level="5">
+    <if_sid>118000</if_sid>
+    <field name="dns_response" type="pcre2">^(SERVFAIL|REFUSED)$</field>
+    <description>Infoblox DNS: $(dns_response) resolving $(dns_domain) ($(dns_type)) from $(srcip)</description>
+    <group>infoblox_dns,dns_failure,</group>
+  </rule>
+
+  <!-- SERVFAIL/REFUSED storm from one client — resolver outage or cache-poisoning attempt -->
+  <rule id="118005" level="8" frequency="15" timeframe="60">
+    <if_matched_sid>118004</if_matched_sid>
+    <same_field>srcip</same_field>
+    <description>Infoblox DNS: $(srcip) got 15+ SERVFAIL/REFUSED in 60s — resolver outage or cache-poisoning attempt</description>
+    <group>infoblox_dns,dns_failure,</group>
+  </rule>
+
+  <!-- TXT/NULL successful lookups — telemetry only (level 0), feeds the tunneling
+       correlation. Child of 118001 (NOERROR) so it overrides as the more-specific
+       match and is actually counted, instead of being shadowed by its sibling. -->
+  <rule id="118006" level="0">
+    <if_sid>118001</if_sid>
+    <field name="dns_type" type="pcre2">^(TXT|NULL)$</field>
+    <description>Infoblox DNS: $(dns_type) lookup for $(dns_domain) from $(srcip)</description>
+    <options>no_full_log</options>
+    <group>infoblox_dns,dns_txt,</group>
+  </rule>
+
+  <!-- High volume of TXT/NULL lookups from one client — possible DNS tunneling/exfil.
+       frequency/timeframe are heuristic; tune to your TXT baseline (mail servers
+       doing SPF/DKIM/DMARC can be noisy). -->
+  <rule id="118007" level="11" frequency="40" timeframe="60">
+    <if_matched_sid>118006</if_matched_sid>
+    <same_field>srcip</same_field>
+    <description>Infoblox DNS: $(srcip) made 40+ TXT/NULL lookups in 60s — possible DNS tunneling/exfiltration</description>
+    <mitre>
+      <id>T1048.003</id>
+      <id>T1071.004</id>
+    </mitre>
+    <group>infoblox_dns,dns_tunneling,data_exfiltration,</group>
+  </rule>
+
+  <!-- ============================================================== -->
+  <!-- SECTION 2: RPZ / DNS FIREWALL THREATS                          -->
+  <!-- ============================================================== -->
+
+  <!-- Any RPZ hit (block or redirect by DNS Firewall policy) -->
+  <rule id="118010" level="8">
+    <if_sid>118000</if_sid>
+    <field name="rpz_action" type="pcre2">.+</field>
+    <description>Infoblox RPZ: $(dns_domain) $(rpz_action) for $(srcip) by DNS Firewall Policy</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>infoblox_dns,infoblox_threat,rpz_block,dns_threat,pci_dss_11.4,</group>
+  </rule>
+
+  <!-- Infoblox threat level is a 0-100 score (official buckets:
+       0-29 Low, 30-79 Medium, 80-100 High). The previous >=2 test wrongly
+       flagged Low scores as critical. -->
+
+  <!-- MEDIUM threat (score 30-79) -->
+  <rule id="118014" level="9">
+    <if_sid>118010</if_sid>
+    <field name="threat_level" type="pcre2">^(3\d|[4-7]\d)$</field>
+    <description>Infoblox RPZ: MEDIUM threat (level $(threat_level)) $(threat_property) — $(dns_domain) from $(srcip)</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>infoblox_dns,infoblox_threat,rpz_block,dns_threat,</group>
+  </rule>
+
+  <!-- HIGH threat (score 80-100) -->
+  <rule id="118011" level="12">
+    <if_sid>118010</if_sid>
+    <field name="threat_level" type="pcre2">^(8\d|9\d|100)$</field>
+    <description>Infoblox RPZ: HIGH threat (level $(threat_level)) $(threat_property) — $(dns_domain) from $(srcip)</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>infoblox_dns,infoblox_threat,rpz_block,dns_threat,critical,</group>
+  </rule>
+
+  <!-- Threat property indicates active malware / C2 / phishing -->
+  <rule id="118012" level="12">
+    <if_sid>118010</if_sid>
+    <field name="threat_property" type="pcre2">(?i)malware|ransom|c2|command.?and.?control|botnet|phish|exploit|apt|trojan</field>
+    <description>Infoblox RPZ: Malware/C2 indicator '$(threat_property)' — $(dns_domain) from $(srcip) — Likely Infected Host</description>
+    <mitre>
+      <id>T1071.004</id>
+      <id>T1568.001</id>
+    </mitre>
+    <group>infoblox_dns,infoblox_threat,rpz_block,infected_host,</group>
+  </rule>
+
+  <!-- Repeated RPZ hits from one client — infected host / C2 callback -->
+  <rule id="118013" level="10" frequency="10" timeframe="120">
+    <if_matched_sid>118010</if_matched_sid>
+    <same_field>srcip</same_field>
+    <description>Infoblox RPZ: Client $(srcip) hit DNS Firewall 10+ times in 120s — Likely Infected Host</description>
+    <mitre>
+      <id>T1071.004</id>
+      <id>T1568.001</id>
+    </mitre>
+    <group>infoblox_dns,infoblox_threat,rpz_storm,infected_host,</group>
+  </rule>
+
+  <!-- Hard block by DNS Firewall (more severe than a redirect) -->
+  <rule id="118016" level="10">
+    <if_sid>118010</if_sid>
+    <field name="rpz_action" type="pcre2">(?i)^(Block|NXDOMAIN|NODATA)$</field>
+    <description>Infoblox RPZ: BLOCKED $(dns_domain) for $(srcip) — feed $(rpz_feed)</description>
+    <mitre>
+      <id>T1071.004</id>
+    </mitre>
+    <group>infoblox_dns,infoblox_threat,rpz_block,</group>
+  </rule>
+
+  <!-- Passthru/Log on a feed-flagged domain — allowlist override, worth reviewing -->
+  <rule id="118017" level="6">
+    <if_sid>118010</if_sid>
+    <field name="rpz_action" type="pcre2">(?i)^(Passthru|Log)$</field>
+    <description>Infoblox RPZ: $(rpz_action) (allow-listed) on feed-flagged $(dns_domain) from $(srcip) — review allowlist</description>
+    <group>infoblox_dns,infoblox_threat,rpz_passthru,</group>
+  </rule>
+
+  <!-- ============================================================== -->
+  <!-- SECTION 3: DHCP LEASE EVENTS                                   -->
+  <!-- ============================================================== -->
+
+  <!-- Lease lifecycle (update / delete) — IP-to-MAC mapping record -->
+  <rule id="118020" level="3">
+    <if_sid>118000</if_sid>
+    <field name="dhcp_leaseop" type="pcre2">.+</field>
+    <description>Infoblox DHCP: Lease $(dhcp_leaseop) — IP $(dhcp_ip) MAC $(dhcp_mac) on $(dhcp_subnet)</description>
+    <group>infoblox_dhcp,dhcp_lease,</group>
+  </rule>
+
+  <!-- Abandoned lease (LeaseOp=Abandon) — address conflict, pool starvation, rogue device -->
+  <rule id="118021" level="7">
+    <if_sid>118020</if_sid>
+    <field name="dhcp_leaseop" type="pcre2">(?i)^Abandon$</field>
+    <description>Infoblox DHCP: lease ABANDONED — IP $(dhcp_ip) MAC $(dhcp_mac) on $(dhcp_subnet) — conflict/starvation/rogue device</description>
+    <mitre>
+      <id>T1498</id>
+    </mitre>
+    <group>infoblox_dhcp,dhcp_abandon,</group>
+  </rule>
+
+  <!-- Multiple abandons on one subnet — possible DHCP starvation attack -->
+  <rule id="118022" level="10" frequency="10" timeframe="120">
+    <if_matched_sid>118021</if_matched_sid>
+    <same_field>dhcp_subnet</same_field>
+    <description>Infoblox DHCP: 10+ abandoned leases on $(dhcp_subnet) in 120s — possible DHCP starvation attack</description>
+    <mitre>
+      <id>T1498</id>
+    </mitre>
+    <group>infoblox_dhcp,dhcp_starvation,</group>
+  </rule>
+
+  <!-- ============================================================== -->
+  <!-- SECTION 4: SERVICE / AGENT LOGS                                -->
+  <!-- ============================================================== -->
+
+  <!-- BloxOne service/agent operational log — informational -->
+  <rule id="118030" level="0">
+    <if_sid>118000</if_sid>
+    <field name="service_name" type="pcre2">.+</field>
+    <description>Infoblox Data Connector: Service log [$(service_name)]</description>
+    <options>no_full_log</options>
+    <group>infoblox_service,</group>
+  </rule>
+
+  <!-- Service log reporting an error / warning -->
+  <rule id="118031" level="5">
+    <if_sid>118030</if_sid>
+    <match type="pcre2">\bERROR\b|\bFATAL\b|\bCRITICAL\b|\bWARN(?:ING)?\b</match>
+    <description>Infoblox Data Connector: Service issue logged [$(service_name)]</description>
+    <group>infoblox_service,service_error,</group>
+  </rule>
+
+  <!-- ============================================================== -->
+  <!-- SECTION 5 (PRE-STAGED): AUDIT LOGS & SOC INSIGHTS              -->
+  <!-- Not forwarded yet — uncomment together with the matching        -->
+  <!-- decoders (112-infoblox-decoders.xml) once a sample is captured. -->
+  <!-- ============================================================== -->
+  <!--
+  <rule id="118040" level="5">
+    <if_sid>118000</if_sid>
+    <field name="audit_action" type="pcre2">.+</field>
+    <description>Infoblox Audit: $(audit_user) performed $(audit_action) ($(audit_result))</description>
+    <group>infoblox_audit,</group>
+  </rule>
+
+  <rule id="118041" level="10">
+    <if_sid>118040</if_sid>
+    <field name="audit_result" type="pcre2">(?i)fail|denied|error</field>
+    <description>Infoblox Audit: FAILED $(audit_action) by $(audit_user) from $(audit_client_ip)</description>
+    <mitre>
+      <id>T1078</id>
+    </mitre>
+    <group>infoblox_audit,authentication_failed,</group>
+  </rule>
+
+  <rule id="118050" level="12">
+    <if_sid>118000</if_sid>
+    <field name="insight_threat_class" type="pcre2">.+</field>
+    <description>Infoblox SOC Insight: $(insight_threat_class)/$(insight_threat_family) (level $(threat_level))</description>
+    <mitre>
+      <id>T1568</id>
+    </mitre>
+    <group>infoblox_insight,threat_insight,critical,</group>
+  </rule>
+  -->
+
+</group>
