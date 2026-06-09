@@ -130,32 +130,79 @@ buckets (and how this ruleset maps them) are:
 
 ```
 infoblox-cef                 (parent — prematch on CEF:0|Infoblox|Data Connector)
-├── infoblox-cef-dns         DNS Response (cloud field order)
-├── infoblox-cef-dns-niosx   DNS Response (NIOS-X field order)
-├── infoblox-cef-rpz-rich    RPZ + feed name + threat confidence/level/property
-├── infoblox-cef-rpz         RPZ + threat level/property (no feed)
-├── infoblox-cef-rpz-min     RPZ minimal (action/src/domain) fallback
-├── infoblox-cef-dhcp        DHCP lease
-└── infoblox-cef-service     BloxOne service log
+├── infoblox-cef-dns-v2      DNS Response — enriched (tags/host/network/conn-type/dst/proto)
+├── infoblox-cef-dns         DNS Response (cloud field order) — fallback
+├── infoblox-cef-dns-niosx   DNS Response (NIOS-X field order) — fallback
+├── infoblox-cef-rpz-v2      RPZ — enriched superset (identity/site/policy/zone/IOC)
+├── infoblox-cef-rpz-rich    RPZ + feed name + threat confidence/level/property — fallback
+├── infoblox-cef-rpz         RPZ + threat level/property (no feed) — fallback
+├── infoblox-cef-rpz-min     RPZ minimal (action/src/domain) — fallback
+├── infoblox-cef-dhcp-v2     DHCP lease — enriched (hostname/clientid/lifetime)
+├── infoblox-cef-dhcp        DHCP lease — fallback
+└── infoblox-cef-service-v2  BloxOne service log — enriched (error text + service id)
 ```
 
 **Ordering matters.** Wazuh applies the *first* sibling decoder whose regex
-matches, so the RPZ decoders are ordered rich → full → min: feed/confidence
-enrichment is best-effort and degrades gracefully when those keys are absent.
+matches. The `-v2` decoders are placed **first** and are a strict **superset**
+of every field the rules need, plus full context. If a `-v2` regex doesn't match
+(e.g. an unexpected field order), decoding falls through to the legacy
+rich → full → min decoders, so the rules still fire — enrichment degrades
+gracefully and never breaks detection.
 
-**Captured fields:** `srcip`, `dns_domain`, `dns_type`, `dns_response`,
-`rpz_action`, `rpz_feed`, `threat_confidence`, `threat_level`, `threat_property`,
-`dhcp_ip`, `dhcp_mac`, `dhcp_subnet`, `dhcp_leaseop`, `service_name`.
+### Captured fields
 
-### Known limitations / notes
+**Core (all event families):** `srcip`, `dns_domain`, `dns_type`,
+`dns_response`, `rpz_action`, `rpz_feed`, `threat_confidence`, `threat_level`,
+`threat_property`, `dhcp_ip`, `dhcp_mac`, `dhcp_subnet`, `dhcp_leaseop`,
+`service_name`.
 
-- **CEF field order is positional.** The 2.1.3 emitter is stable, but
-  Infoblox can change ordering between pipeline versions. If a future version
-  reorders keys, the `.*?`-bridged regexes may need adjusting.
-- **`suser` (user identity) is not captured** — it is empty unless you enable
-  user attribution (identity/SSO integration) in BloxOne. Add it to the DNS/RPZ
-  decoders once it is populated.
-- IPv6/DUID-only DHCP leases (no `smac`) are not matched by the DHCP decoder.
+**Enriched (v2 decoders):**
+
+| Field | Source CEF key | Where | Notes |
+|-------|----------------|-------|-------|
+| `srcuser` | `suser` | RPZ | User identity — populated on endpoint / `remote_client` events |
+| `src_os` | `InfobloxB1SrcOSVersion` | RPZ | Endpoint OS, e.g. `macOS 26.3.1` |
+| `hostname` | `dvchost` / `shost` | DNS, RPZ, DHCP | Device hostname (DHCP `shost` = the IP↔host map) |
+| `infoblox_network` | `InfobloxB1Network` | DNS, RPZ | Network / site name |
+| `infoblox_ophost` | `InfobloxB1OPHName` | DNS, RPZ | DFP / on-prem host (site) |
+| `infoblox_conn_type` | `InfobloxB1ConnectionType` | DNS, RPZ | `dfp` / `remote_office` / `remote_client` |
+| `infoblox_dns_tags` | `InfobloxB1DNSTags` | DNS, RPZ | App / category classification |
+| `dstip` | `dst` | DNS, RPZ | Resolver / sinkhole / redirect target |
+| `srcport` | `spt` | DNS, RPZ | Source port |
+| `protocol` | `proto` | DNS | UDP / TCP |
+| `threat_indicator` | `InfobloxB1ThreatIndicator` | RPZ | The matched IOC |
+| `rpz_zone` | `InfobloxRPZ` | RPZ | RPZ zone that fired |
+| `rpz_rule` | `InfobloxRPZRule` | RPZ | Full rewrite rule |
+| `rpz_policy` | `InfobloxB1PolicyName` | RPZ | Security policy name |
+| `rpz_feedtype` | `InfobloxB1FeedType` | RPZ | Feed type (FQDN / IP) |
+| `srcmac` | `smac` | RPZ | Client MAC |
+| `dhcp_clientid` | `InfobloxClientID` | DHCP | DHCP client identifier |
+| `dhcp_lifetime` | `InfobloxLifetime` | DHCP | Lease lifetime (s) |
+| `infoblox_msg` | `msg` | Service | The actual service log / error line |
+| `infoblox_service_id` | `InfobloxServiceId` | Service | BloxOne service id |
+
+> **Field naming** deliberately reuses Wazuh's existing keyword fields
+> (`srcip`, `dstip`, `srcuser`, `srcport`, `protocol`, `hostname`) and prefixes
+> Infoblox-specific concepts (`infoblox_*`, `rpz_*`, `dhcp_*`). It avoids
+> `data.os`, `data.user` and `data.status`, which are **objects** in the
+> `wazuh-alerts` mapping — writing a string there causes a mapping conflict that
+> silently drops the document from the index.
+
+### Implementation notes
+
+- **Quoted / empty values.** v2 decoders capture possibly-quoted, space-bearing,
+  or empty values with a single PCRE2 branch-reset group:
+  `(?|"([^"]*)"|(\S+))?`. Empty values are omitted (no empty-string fields in
+  the index) rather than stored as `""`.
+- **CEF field order is positional.** The 2.1.3 emitter is stable, but Infoblox
+  can change ordering between pipeline versions. If a future version reorders
+  keys, the `-v2` regex may stop matching and decoding falls back to the legacy
+  decoders (rules keep firing, enrichment is reduced).
+- **`suser` (user identity)** is empty on `dfp` / `remote_office` flows and
+  populated on `remote_client` / BloxOne Endpoint events; it is captured as
+  `srcuser` on RPZ events and omitted when empty. (It is intentionally *not*
+  captured on DNS Response events, where it is always empty in practice.)
+- IPv6/DUID-only DHCP leases (no `smac`) are not matched by the DHCP decoders.
 
 ---
 
@@ -242,8 +289,9 @@ baseline:
 
 - Verify and enable **Audit log** and **SOC Insights** decoders/rules once a
   live sample is available.
-- Capture `suser` / `InfobloxB1DNSTags` for user- and category-attributed
-  detections (DoH, anonymizers, personal storage).
+- Add detections that leverage the enriched fields: user/host-attributed RPZ
+  repeat-offenders (`srcuser` / `hostname`), and category-based rules off
+  `infoblox_dns_tags` (DoH, anonymizers, personal storage).
 - Add RPZ-IP / RPZ-CLIENT-IP specific handling if those trigger types are
   enabled (the prematch already decodes them; dedicated rules can refine).
 

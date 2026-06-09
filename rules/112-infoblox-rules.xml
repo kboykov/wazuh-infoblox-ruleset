@@ -227,7 +227,6 @@
   <!-- Not forwarded yet — uncomment together with the matching        -->
   <!-- decoders (112-infoblox-decoders.xml) once a sample is captured. -->
   <!-- ============================================================== -->
-  <!--
   <rule id="118040" level="5">
     <if_sid>118000</if_sid>
     <field name="audit_action" type="pcre2">.+</field>
@@ -254,6 +253,6 @@
     </mitre>
     <group>infoblox_insight,threat_insight,critical,</group>
   </rule>
-  -->
+
 
 </group>
